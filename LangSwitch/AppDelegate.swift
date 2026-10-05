@@ -1,90 +1,112 @@
 //
-//  ContentView.swift
+//  AppDelegate.swift
 //  LangSwitch
 //
-//  Created by ANTON NIKEEV on 05.07.2023.
-//
 
-import SwiftUI
+import AppKit
 import Carbon
 import Foundation
-import AppKit
-import IOKit.hid
 import ServiceManagement
 
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var statusBarItem: NSStatusItem?
+    private var aboutWindow: NSWindow?
+    private var loginItemMenuItem: NSMenuItem?
+    private var eventMonitor: Any?
+    private var updateTask: URLSessionDataTask?
+    private var anotherClicked = false
+    private var lastPressTime: TimeInterval?
+    private let longPressThreshold: TimeInterval = 0.2
 
-class AppDelegate: NSObject, NSApplicationDelegate {
-    var statusBarItem: NSStatusItem?
-    var aboutWindow: NSWindow?
-    let longPressThreshold: TimeInterval = 0.2;
-    
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // launch at login
-        launchAtLogin()
-        
-        // Create a status bar item with a system icon
         statusBarItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusBarItem?.button?.image = NSImage(systemSymbolName: "globe", accessibilityDescription: nil)
-        statusBarItem?.isVisible = true
-        
-        // Add a menu to the status bar item
+        statusBarItem?.button?.image = NSImage(systemSymbolName: "globe", accessibilityDescription: "LangSwitch")
+
         let menu = NSMenu()
-        menu.addItem(withTitle: "About LangSwitch", action: #selector(showAboutWindow), keyEquivalent: "")
-        menu.addItem(withTitle: "Hide Icon", action: #selector(hideStatusBarIcon), keyEquivalent: "")
-        menu.addItem(withTitle: "Exit", action: #selector(exitAction), keyEquivalent: "")
-        statusBarItem?.menu = menu
-        
-        // hide menu bar if the button was pressed once
-        let userDefaults = UserDefaults.standard
-        if userDefaults.bool(forKey: "hideStatusBarIcon") {
-            statusBarItem?.isVisible = false
+        menu.delegate = self
+        menu.autoenablesItems = false
+        addMenuItem(to: menu, title: "About LangSwitch", action: #selector(showAboutWindow))
+        loginItemMenuItem = addMenuItem(to: menu, title: "Launch at Login", action: #selector(toggleLaunchAtLogin))
+        if #available(macOS 13.0, *) {
+            addMenuItem(to: menu, title: "Login Items Settings…", action: #selector(openLoginItemSettings))
         }
-        
+        menu.addItem(.separator())
+        addMenuItem(to: menu, title: "Hide Icon", action: #selector(hideStatusBarIcon))
+        addMenuItem(to: menu, title: "Exit", action: #selector(exitAction))
+        statusBarItem?.menu = menu
+        updateLoginItemMenu()
+
+        // Hiding is session-only; old versions persisted a preference that hid all controls.
+        UserDefaults.standard.removeObject(forKey: "hideStatusBarIcon")
+        statusBarItem?.isVisible = true
         NSApp.setActivationPolicy(.accessory)
         NSApp.hide(nil)
-        
-        var anotherClicked = false;
-        var lastPressTime = Date();
-        
-        // Register for Fn button press events
-        NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { event in
-            guard event.keyCode == 63 else {
-                return
-            }
 
-            if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.function) {
-                anotherClicked = false
-                lastPressTime = Date()
-            }
+        // Registering a login item is an explicit menu action, never a launch side effect.
+        eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.handleModifierEvent(event)
+        }
+    }
 
-            if !event.modifierFlags.intersection([.shift, .control, .option, .command]).isEmpty {
-                anotherClicked = true
-            }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Opening the running app from Finder or Spotlight restores access to its menu.
+        showStatusBarIcon()
+        return false
+    }
 
-            let allowedFlags: NSEvent.ModifierFlags = [.capsLock]
-            let remainingFlags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(allowedFlags)
-            if remainingFlags.isEmpty && !anotherClicked {
-                let timePassed = Date().timeIntervalSince(lastPressTime)
-                if timePassed < self.longPressThreshold {
-                    self.switchKeyboardLanguage()
-                }
+    func applicationWillTerminate(_ notification: Notification) {
+        if let eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+        }
+        updateTask?.cancel()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        updateLoginItemMenu()
+    }
+
+    @discardableResult
+    private func addMenuItem(to menu: NSMenu, title: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return item
+    }
+
+    private func handleModifierEvent(_ event: NSEvent) {
+        guard event.keyCode == 63 else { return }
+
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.function) {
+            anotherClicked = false
+            lastPressTime = ProcessInfo.processInfo.systemUptime
+        }
+        if !flags.intersection([.shift, .control, .option, .command]).isEmpty {
+            anotherClicked = true
+        }
+
+        if flags.subtracting(.capsLock).isEmpty && !anotherClicked {
+            guard let lastPressTime else { return }
+            self.lastPressTime = nil
+            if ProcessInfo.processInfo.systemUptime - lastPressTime < longPressThreshold {
+                switchKeyboardLanguage()
             }
         }
     }
-    
-    @objc func showAboutWindow() {
+
+    @objc private func showAboutWindow() {
         if aboutWindow == nil {
             let windowWidth: CGFloat = 300
             let windowHeight: CGFloat = 180
-            
             let windowContent = NSView(frame: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight))
             let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown version"
 
             let versionLabel = NSTextField(labelWithString: "LangSwitch v\(version)")
             versionLabel.frame = NSRect(x: (windowWidth - 150) / 2, y: 130, width: 150, height: 20)
-            versionLabel.alignment = .center // Центрирование текста
+            versionLabel.alignment = .center
             windowContent.addSubview(versionLabel)
-            
+
             let gitHubButton = NSButton(title: "GitHub Page", target: self, action: #selector(openGitHub))
             gitHubButton.frame = NSRect(x: (windowWidth - 100) / 2, y: 90, width: 100, height: 30)
             windowContent.addSubview(gitHubButton)
@@ -93,162 +115,195 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             checkUpdatesButton.frame = NSRect(x: (windowWidth - 150) / 2, y: 50, width: 150, height: 30)
             windowContent.addSubview(checkUpdatesButton)
 
-            aboutWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight),
-                                   styleMask: [.titled, .closable],
-                                   backing: .buffered,
-                                   defer: false)
-            aboutWindow?.contentView = windowContent
-            aboutWindow?.center()
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: windowWidth, height: windowHeight),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = windowContent
+            window.center()
+            aboutWindow = window
         }
         aboutWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
-    
-    @objc func launchAtLogin() {
+
+    private func updateLoginItemMenu() {
+        guard let loginItemMenuItem else { return }
         if #available(macOS 13.0, *) {
-            do {
-                if SMAppService.mainApp.status == .enabled {
-                    // do nothing
-                    print("Login item already registered.")
-                } else {
-                    try SMAppService.mainApp.register()
-                }
-            } catch {
-                print("Failed to enable login item: \(error)")
+            loginItemMenuItem.isEnabled = true
+            switch SMAppService.mainApp.status {
+            case .enabled:
+                loginItemMenuItem.state = .on
+            case .requiresApproval:
+                loginItemMenuItem.state = .mixed
+            case .notRegistered, .notFound:
+                loginItemMenuItem.state = .off
+            @unknown default:
+                loginItemMenuItem.isEnabled = false
+                loginItemMenuItem.state = .off
             }
         } else {
-            // Fallback on earlier versions
-            print("Login item functionality is not available on this version of macOS.")
+            loginItemMenuItem.title = "Launch at Login (macOS 13+)"
+            loginItemMenuItem.isEnabled = false
         }
     }
 
-
-    @objc func openGitHub() {
-        if let url = URL(string: "https://github.com/Nikeev/LangSwitch") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-    
-    @objc func checkForUpdates() {
-        guard let url = URL(string: "https://api.github.com/repos/Nikeev/LangSwitch/releases/latest") else { return }
-
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
-            guard let data = data, error == nil else {
-                self.showAlert(message: "Failed to check for updates.")
-                return
-            }
-
-            do {
-                if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-                   let latestVersion = json["tag_name"] as? String {
-                    let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
-
-                    if latestVersion > "v\(currentVersion)" {
-                        self.showAlert(message: "New version \(latestVersion) is available! Download it from GitHub.")
-                    } else {
-                        self.showAlert(message: "You're up to date.")
-                    }
+    @objc private func toggleLaunchAtLogin() {
+        guard #available(macOS 13.0, *) else { return }
+        do {
+            switch SMAppService.mainApp.status {
+            case .enabled, .requiresApproval:
+                try SMAppService.mainApp.unregister()
+            case .notRegistered, .notFound:
+                try SMAppService.mainApp.register()
+                if SMAppService.mainApp.status == .requiresApproval {
+                    showAlert(message: "Allow LangSwitch in Login Items Settings to enable launch at login.")
                 }
-            } catch {
-                self.showAlert(message: "Error parsing update information.")
+            @unknown default:
+                showAlert(message: "Unable to determine the launch at login status.")
+            }
+        } catch {
+            showAlert(message: "Failed to change launch at login: \(error.localizedDescription)")
+        }
+        updateLoginItemMenu()
+    }
+
+    @objc private func openLoginItemSettings() {
+        if #available(macOS 13.0, *) {
+            SMAppService.openSystemSettingsLoginItems()
+        }
+    }
+
+    @objc private func openGitHub() {
+        guard let url = URL(string: "https://github.com/toivan/LangSwitch") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func checkForUpdates() {
+        guard updateTask == nil else { return }
+        guard let versionString = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+              let currentVersion = ReleaseVersion(versionString) else {
+            showAlert(message: "Unable to determine the current app version.")
+            return
+        }
+        guard let url = URL(string: "https://api.github.com/repos/toivan/LangSwitch/releases/latest") else { return }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        updateTask = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            let message: String
+            let releasesPage = "https://github.com/toivan/LangSwitch/releases"
+            if error != nil {
+                message = "The update check failed because of a network error. Check your connection and try again."
+            } else if let response = response as? HTTPURLResponse {
+                switch response.statusCode {
+                case 200:
+                    if let data,
+                       let release = try? JSONDecoder().decode(GitHubRelease.self, from: data),
+                       release.tagName.utf8.count <= 128,
+                       let latestVersion = ReleaseVersion(release.tagName) {
+                        message = latestVersion > currentVersion
+                            ? "New version \(release.tagName) is available! Download it from GitHub."
+                            : "You're up to date."
+                    } else {
+                        message = "Invalid version information received from GitHub."
+                    }
+                case 404:
+                    message = "GitHub has no public release information for this repository. Check the fork's Releases page: \(releasesPage)"
+                case 429:
+                    message = "GitHub's request limit has been reached. Try again later, or check the Releases page: \(releasesPage)"
+                case 403:
+                    if response.value(forHTTPHeaderField: "X-RateLimit-Remaining") == "0"
+                        || response.value(forHTTPHeaderField: "Retry-After") != nil {
+                        message = "GitHub's request limit has been reached. Try again later, or check the Releases page: \(releasesPage)"
+                    } else {
+                        message = "GitHub denied this update check (HTTP 403), possibly because of a request limit. Try again later, or check the Releases page: \(releasesPage)"
+                    }
+                default:
+                    message = "GitHub returned HTTP \(response.statusCode) while checking for updates. Please try again later."
+                }
+            } else {
+                message = "GitHub returned an unexpected response while checking for updates. Please try again later."
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.updateTask = nil
+                self?.showAlert(message: message)
             }
         }
-        task.resume()
+        updateTask?.resume()
     }
-    
-    func showAlert(message: String) {
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = message
-            alert.runModal()
-        }
+
+    private func showAlert(message: String) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.runModal()
     }
-    
-    @objc func hideStatusBarIcon() {
+
+    @objc private func hideStatusBarIcon() {
+        let alert = NSAlert()
+        alert.messageText = "Hide the LangSwitch icon?"
+        alert.informativeText = "To show the icon again, open LangSwitch from Finder or Spotlight. It also reappears when LangSwitch next starts."
+        alert.addButton(withTitle: "Hide Icon")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         statusBarItem?.isVisible = false
-        let userDefaults = UserDefaults.standard
-        userDefaults.set(true, forKey: "hideStatusBarIcon")
-        UserDefaults.standard.synchronize()
     }
-    
-    @objc func exitAction() {
+
+    private func showStatusBarIcon() {
+        statusBarItem?.isVisible = true
+    }
+
+    @objc private func exitAction() {
         NSApplication.shared.terminate(nil)
     }
-    
-    func switchKeyboardLanguage() {
-        // Get the current keyboard input source
-        guard let currentSource = TISCopyCurrentKeyboardInputSource()?.takeUnretainedValue() else {
-            print("Failed to switch keyboard language.")
+
+    private func switchKeyboardLanguage() {
+        guard let currentSource = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
+            print("Failed to get the current keyboard input source.")
             return
         }
-        
-        // Get all enabled keyboard input sources
-        guard let inputSources = getInputSources() as? [TISInputSource],
-              !inputSources.isEmpty else {
-            print("Failed to switch keyboard language.")
+        let inputSources = getInputSources()
+        guard !inputSources.isEmpty,
+              let currentIndex = inputSources.firstIndex(where: { $0 == currentSource }) else {
+            print("Failed to find the current keyboard input source.")
             return
         }
-        
-        // Find the index of the current input source
-        guard let currentIndex = inputSources.firstIndex(where: { $0 == currentSource }) else {
-            print("Failed to switch keyboard language.")
+        let nextSource = inputSources[(currentIndex + 1) % inputSources.count]
+        guard TISSelectInputSource(nextSource) == noErr else {
+            print("Failed to select the next keyboard input source.")
             return
         }
-        
-        // Calculate the index of the next input source
-        let nextIndex = (currentIndex + 1) % inputSources.count
-        
-        // Retrieve the next input source
-        let nextSource = inputSources[nextIndex]
-        
-        // Switch to the next input source
-        TISSelectInputSource(nextSource)
-        
-        // Print the new input source's name
-        let newSourceName = Unmanaged<CFString>.fromOpaque(TISGetInputSourceProperty(nextSource, kTISPropertyLocalizedName)).takeUnretainedValue() as String
-        print("Switched to: \(newSourceName)")
     }
-    
-    func getInputSources() -> [TISInputSource] {
-        let inputSourceNSArray = TISCreateInputSourceList(nil, false)
-            .takeRetainedValue() as NSArray
-        var inputSourceList = inputSourceNSArray as! [TISInputSource]
-        
-        inputSourceList = inputSourceList.filter({
-            $0.category == TISInputSource.Category.keyboardInputSource
-        })
-        
-        let inputSources = inputSourceList.filter(
-            {
-                $0.isSelectable
-            })
-        
-        return inputSources
+
+    private func getInputSources() -> [TISInputSource] {
+        guard let sources = TISCreateInputSourceList(nil, false)?.takeRetainedValue() as? [TISInputSource] else {
+            return []
+        }
+        return sources.filter {
+            $0.category == kTISCategoryKeyboardInputSource as String && $0.isSelectable
+        }
     }
 }
 
-extension TISInputSource {
-    enum Category {
-        static var keyboardInputSource: String {
-            return kTISCategoryKeyboardInputSource as String
-        }
+private struct GitHubRelease: Decodable {
+    let tagName: String
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
     }
-    
-    private func getProperty(_ key: CFString) -> AnyObject? {
-        let cfType = TISGetInputSourceProperty(self, key)
-        if (cfType != nil) {
-            return Unmanaged<AnyObject>.fromOpaque(cfType!)
-                .takeUnretainedValue()
-        } else {
-            return nil
-        }
+}
+
+private extension TISInputSource {
+    func property(_ key: CFString) -> AnyObject? {
+        guard let value = TISGetInputSourceProperty(self, key) else { return nil }
+        // TISGetInputSourceProperty follows the Get rule; the source owns this value.
+        return Unmanaged<AnyObject>.fromOpaque(value).takeUnretainedValue()
     }
-    
-    var category: String {
-        return getProperty(kTISPropertyInputSourceCategory) as! String
+
+    var category: String? {
+        property(kTISPropertyInputSourceCategory) as? String
     }
-    
+
     var isSelectable: Bool {
-        return getProperty(kTISPropertyInputSourceIsSelectCapable) as! Bool
+        property(kTISPropertyInputSourceIsSelectCapable) as? Bool ?? false
     }
 }

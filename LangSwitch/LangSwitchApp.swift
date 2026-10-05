@@ -8,6 +8,7 @@
 import SwiftUI
 
 @main
+@MainActor
 struct LangSwitchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
